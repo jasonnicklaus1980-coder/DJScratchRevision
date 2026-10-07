@@ -1,36 +1,60 @@
-# This is a basic workflow to help you get started with Actions
+name: build
 
-name: CI
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
   push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
-jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
-    runs-on: ubuntu-latest
+permissions:
+  contents: write
 
-    # Steps represent a sequence of tasks that will be executed as part of the job
+jobs:
+  build:
+    runs-on: ubuntu-22.04
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v4
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
-
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      - name: Locate project (unpack the source zip if that's what was uploaded)
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          if [ -f Makefile ]; then echo "PROJ=." >> "$GITHUB_ENV"
+          elif [ -f DJScratch-MPC/Makefile ]; then echo "PROJ=DJScratch-MPC" >> "$GITHUB_ENV"
+          elif ls *.zip >/dev/null 2>&1; then
+            unzip -q -o "$(ls *.zip | head -1)" -d src_unzipped
+            dir=$(dirname "$(find src_unzipped -name Makefile | head -1)")
+            [ -n "$dir" ] || { echo "No Makefile inside the zip"; exit 1; }
+            echo "PROJ=$dir" >> "$GITHUB_ENV"
+          else echo "Can't find the DJScratch project (Makefile or source zip)"; exit 1; fi
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++-arm-linux-gnueabihf binutils-arm-linux-gnueabihf file zip
+          pip install --quiet pillow
+
+      - name: Offline host test (x86)
+        working-directory: ${{ env.PROJ }}
+        run: |
+          make test
+          make abi32
+
+      - name: Build ARM plugin + package
+        working-directory: ${{ env.PROJ }}
+        run: |
+          chmod +x scripts/*.sh mpc/*.sh
+          READELF=arm-linux-gnueabihf-readelf ./scripts/package.sh
+          ls -la dist
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DJScratch-mpc-armv7
+          path: ${{ env.PROJ }}/dist/*.zip
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: DJ Scratch (build ${{ github.run_number }})
+          make_latest: true
+          files: |
+            ${{ env.PROJ }}/dist/DJScratch-1.4.0-mpc-armv7.zip
+            ${{ env.PROJ }}/dist/setup.sh
